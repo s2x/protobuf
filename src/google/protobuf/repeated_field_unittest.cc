@@ -24,6 +24,7 @@
 #include <limits>
 #include <list>
 #include <memory>
+#include <new>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -34,7 +35,6 @@
 #include <gtest/gtest.h>
 #include "absl/log/absl_check.h"
 #include "absl/numeric/bits.h"
-#include "absl/random/random.h"
 #include "absl/strings/cord.h"
 #include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
@@ -201,12 +201,10 @@ TEST(RepeatedField, Small) {
 
   EXPECT_TRUE(field.empty());
   EXPECT_EQ(field.size(), 0);
-  // Additional bytes are for 'struct Rep' header.
-  int expected_usage =
-      (sizeof(Arena*) > sizeof(int) ? sizeof(Arena*) / sizeof(int) : 3) *
-          sizeof(int) +
-      sizeof(Arena*);
-  EXPECT_GE(field.SpaceUsedExcludingSelf(), expected_usage);
+  if (sizeof(void*) == 8) {
+    // Usage should be 0 because this should fit in SOO space.
+    EXPECT_EQ(field.SpaceUsedExcludingSelf(), 0);
+  }
 }
 
 
@@ -237,7 +235,7 @@ void CheckAllocationSizes(bool is_ptr) {
   std::string buf(1 << 20, 0);
 
   Arena arena(&buf[0], buf.size());
-  auto* rep = Arena::CreateMessage<Rep>(&arena);
+  auto* rep = Arena::Create<Rep>(&arena);
   size_t prev = arena.SpaceUsed();
 
   for (int i = 0; i < 100; ++i) {
@@ -258,8 +256,11 @@ void CheckAllocationSizes(bool is_ptr) {
         ASSERT_EQ((1 << log2), last_alloc);
       }
 
-      // The byte size must be a multiple of 8.
-      ASSERT_EQ(rep->Capacity() * sizeof(T) % 8, 0);
+      // The byte size must be a multiple of 8 when not SOO.
+      const int capacity_bytes = rep->Capacity() * sizeof(T);
+      if (capacity_bytes > internal::kSooCapacityBytes) {
+        ASSERT_EQ(capacity_bytes % 8, 0);
+      }
     }
   }
 }
@@ -274,6 +275,7 @@ TEST(RepeatedField, ArenaAllocationSizesMatchExpectedValues) {
   CheckAllocationSizes<RepeatedField<bool>>(false);
   CheckAllocationSizes<RepeatedField<uint32_t>>(false);
   CheckAllocationSizes<RepeatedField<uint64_t>>(false);
+  CheckAllocationSizes<RepeatedField<absl::Cord>>(false);
 }
 
 TEST(RepeatedField, NaturalGrowthOnArenasReuseBlocks) {
@@ -283,7 +285,7 @@ TEST(RepeatedField, NaturalGrowthOnArenasReuseBlocks) {
   static constexpr int kNumFields = 100;
   static constexpr int kNumElems = 1000;
   for (int i = 0; i < kNumFields; ++i) {
-    values.push_back(Arena::CreateMessage<RepeatedField<int>>(&arena));
+    values.push_back(Arena::Create<RepeatedField<int>>(&arena));
     auto& field = *values.back();
     for (int j = 0; j < kNumElems; ++j) {
       field.Add(j);
@@ -478,14 +480,6 @@ TEST(RepeatedField, Resize) {
   EXPECT_EQ(2, field.Get(3));
   field.Resize(0, 4);
   EXPECT_TRUE(field.empty());
-}
-
-TEST(RepeatedField, ReserveNothing) {
-  RepeatedField<int> field;
-  EXPECT_EQ(0, field.Capacity());
-
-  field.Reserve(-1);
-  EXPECT_EQ(0, field.Capacity());
 }
 
 TEST(RepeatedField, ReserveLowerClamp) {
@@ -898,9 +892,7 @@ TEST(RepeatedField, MoveConstruct) {
     RepeatedField<int> source;
     source.Add(1);
     source.Add(2);
-    const int* data = source.data();
     RepeatedField<int> destination = std::move(source);
-    EXPECT_EQ(data, destination.data());
     EXPECT_THAT(destination, ElementsAre(1, 2));
     // This property isn't guaranteed but it's useful to have a test that would
     // catch changes in this area.
@@ -908,8 +900,7 @@ TEST(RepeatedField, MoveConstruct) {
   }
   {
     Arena arena;
-    RepeatedField<int>* source =
-        Arena::CreateMessage<RepeatedField<int>>(&arena);
+    RepeatedField<int>* source = Arena::Create<RepeatedField<int>>(&arena);
     source->Add(1);
     source->Add(2);
     RepeatedField<int> destination = std::move(*source);
@@ -928,40 +919,30 @@ TEST(RepeatedField, MoveAssign) {
     source.Add(2);
     RepeatedField<int> destination;
     destination.Add(3);
-    const int* source_data = source.data();
-    const int* destination_data = destination.data();
     destination = std::move(source);
-    EXPECT_EQ(source_data, destination.data());
     EXPECT_THAT(destination, ElementsAre(1, 2));
-    // This property isn't guaranteed but it's useful to have a test that would
-    // catch changes in this area.
-    EXPECT_EQ(destination_data, source.data());
     EXPECT_THAT(source, ElementsAre(3));
   }
   {
     Arena arena;
-    RepeatedField<int>* source =
-        Arena::CreateMessage<RepeatedField<int>>(&arena);
+    RepeatedField<int>* source = Arena::Create<RepeatedField<int>>(&arena);
     source->Add(1);
     source->Add(2);
-    RepeatedField<int>* destination =
-        Arena::CreateMessage<RepeatedField<int>>(&arena);
+    RepeatedField<int>* destination = Arena::Create<RepeatedField<int>>(&arena);
     destination->Add(3);
-    const int* source_data = source->data();
     *destination = std::move(*source);
-    EXPECT_EQ(source_data, destination->data());
     EXPECT_THAT(*destination, ElementsAre(1, 2));
     EXPECT_THAT(*source, ElementsAre(3));
   }
   {
     Arena source_arena;
     RepeatedField<int>* source =
-        Arena::CreateMessage<RepeatedField<int>>(&source_arena);
+        Arena::Create<RepeatedField<int>>(&source_arena);
     source->Add(1);
     source->Add(2);
     Arena destination_arena;
     RepeatedField<int>* destination =
-        Arena::CreateMessage<RepeatedField<int>>(&destination_arena);
+        Arena::Create<RepeatedField<int>>(&destination_arena);
     destination->Add(3);
     *destination = std::move(*source);
     EXPECT_THAT(*destination, ElementsAre(1, 2));
@@ -971,8 +952,7 @@ TEST(RepeatedField, MoveAssign) {
   }
   {
     Arena arena;
-    RepeatedField<int>* source =
-        Arena::CreateMessage<RepeatedField<int>>(&arena);
+    RepeatedField<int>* source = Arena::Create<RepeatedField<int>>(&arena);
     source->Add(1);
     source->Add(2);
     RepeatedField<int> destination;
@@ -988,8 +968,7 @@ TEST(RepeatedField, MoveAssign) {
     source.Add(1);
     source.Add(2);
     Arena arena;
-    RepeatedField<int>* destination =
-        Arena::CreateMessage<RepeatedField<int>>(&arena);
+    RepeatedField<int>* destination = Arena::Create<RepeatedField<int>>(&arena);
     destination->Add(3);
     *destination = std::move(source);
     EXPECT_THAT(*destination, ElementsAre(1, 2));
@@ -1003,20 +982,15 @@ TEST(RepeatedField, MoveAssign) {
     RepeatedField<int>& alias = field;
     field.Add(1);
     field.Add(2);
-    const int* data = field.data();
     field = std::move(alias);
-    EXPECT_EQ(data, field.data());
     EXPECT_THAT(field, ElementsAre(1, 2));
   }
   {
     Arena arena;
-    RepeatedField<int>* field =
-        Arena::CreateMessage<RepeatedField<int>>(&arena);
+    RepeatedField<int>* field = Arena::Create<RepeatedField<int>>(&arena);
     field->Add(1);
     field->Add(2);
-    const int* data = field->data();
     *field = std::move(*field);
-    EXPECT_EQ(data, field->data());
     EXPECT_THAT(*field, ElementsAre(1, 2));
   }
 }
@@ -1246,8 +1220,8 @@ TEST(RepeatedField, HardenAgainstBadTruncate) {
   for (int size = 0; size < 10; ++size) {
     field.Truncate(size);
 #if GTEST_HAS_DEATH_TEST
-    EXPECT_DEBUG_DEATH(field.Truncate(size + 1), "new_size <= current_size_");
-    EXPECT_DEBUG_DEATH(field.Truncate(size + 2), "new_size <= current_size_");
+    EXPECT_DEBUG_DEATH(field.Truncate(size + 1), "new_size <= old_size");
+    EXPECT_DEBUG_DEATH(field.Truncate(size + 2), "new_size <= old_size");
 #elif defined(NDEBUG)
     field.Truncate(size + 1);
     field.Truncate(size + 1);
@@ -1342,14 +1316,27 @@ TEST(RepeatedField, PoisonsMemoryOnAssign) {
 TEST(RepeatedField, Cleanups) {
   Arena arena;
   auto growth = internal::CleanupGrowth(
-      arena, [&] { Arena::CreateMessage<RepeatedField<int>>(&arena); });
+      arena, [&] { Arena::Create<RepeatedField<int>>(&arena); });
   EXPECT_THAT(growth.cleanups, testing::IsEmpty());
 
   void* ptr;
-  growth = internal::CleanupGrowth(arena, [&] {
-    ptr = Arena::CreateMessage<RepeatedField<absl::Cord>>(&arena);
-  });
+  growth = internal::CleanupGrowth(
+      arena, [&] { ptr = Arena::Create<RepeatedField<absl::Cord>>(&arena); });
   EXPECT_THAT(growth.cleanups, testing::UnorderedElementsAre(ptr));
+}
+
+TEST(RepeatedField, InitialSooCapacity) {
+  if (sizeof(void*) == 8) {
+    EXPECT_EQ(RepeatedField<bool>().Capacity(), 3);
+    EXPECT_EQ(RepeatedField<int32_t>().Capacity(), 2);
+    EXPECT_EQ(RepeatedField<int64_t>().Capacity(), 1);
+    EXPECT_EQ(RepeatedField<absl::Cord>().Capacity(), 0);
+  } else {
+    EXPECT_EQ(RepeatedField<bool>().Capacity(), 0);
+    EXPECT_EQ(RepeatedField<int32_t>().Capacity(), 0);
+    EXPECT_EQ(RepeatedField<int64_t>().Capacity(), 0);
+    EXPECT_EQ(RepeatedField<absl::Cord>().Capacity(), 0);
+  }
 }
 
 // ===================================================================
@@ -1496,7 +1483,7 @@ TEST(RepeatedPtrField, NaturalGrowthOnArenasReuseBlocks) {
   static constexpr int kNumFields = 100;
   static constexpr int kNumElems = 1000;
   for (int i = 0; i < kNumFields; ++i) {
-    values.push_back(Arena::CreateMessage<Rep>(&arena));
+    values.push_back(Arena::Create<Rep>(&arena));
     auto& field = *values.back();
     for (int j = 0; j < kNumElems; ++j) {
       field.Add("");
@@ -1760,7 +1747,7 @@ TEST(RepeatedPtrField, AddMethodsDontAcceptNull) {
 TEST(RepeatedPtrField, AddAllocatedDifferentArena) {
   RepeatedPtrField<TestAllTypes> field;
   Arena arena;
-  auto* msg = Arena::CreateMessage<TestAllTypes>(&arena);
+  auto* msg = Arena::Create<TestAllTypes>(&arena);
   field.AddAllocated(msg);
 }
 
@@ -1911,7 +1898,7 @@ TEST(RepeatedPtrField, SmallOptimization) {
 
   // We use an arena to easily measure memory usage, but not needed.
   Arena arena;
-  auto* array = Arena::CreateMessage<RepeatedPtrField<std::string>>(&arena);
+  auto* array = Arena::Create<RepeatedPtrField<std::string>>(&arena);
   EXPECT_EQ(array->Capacity(), 1);
   EXPECT_EQ(array->SpaceUsedExcludingSelf(), 0);
   std::string str;
@@ -1992,7 +1979,7 @@ TEST(RepeatedPtrField, MoveConstruct) {
   {
     Arena arena;
     RepeatedPtrField<std::string>* source =
-        Arena::CreateMessage<RepeatedPtrField<std::string>>(&arena);
+        Arena::Create<RepeatedPtrField<std::string>>(&arena);
     *source->Add() = "1";
     *source->Add() = "2";
     RepeatedPtrField<std::string> destination = std::move(*source);
@@ -2020,11 +2007,11 @@ TEST(RepeatedPtrField, MoveAssign) {
   {
     Arena arena;
     RepeatedPtrField<std::string>* source =
-        Arena::CreateMessage<RepeatedPtrField<std::string>>(&arena);
+        Arena::Create<RepeatedPtrField<std::string>>(&arena);
     *source->Add() = "1";
     *source->Add() = "2";
     RepeatedPtrField<std::string>* destination =
-        Arena::CreateMessage<RepeatedPtrField<std::string>>(&arena);
+        Arena::Create<RepeatedPtrField<std::string>>(&arena);
     *destination->Add() = "3";
     const std::string* const* source_data = source->data();
     *destination = std::move(*source);
@@ -2035,12 +2022,12 @@ TEST(RepeatedPtrField, MoveAssign) {
   {
     Arena source_arena;
     RepeatedPtrField<std::string>* source =
-        Arena::CreateMessage<RepeatedPtrField<std::string>>(&source_arena);
+        Arena::Create<RepeatedPtrField<std::string>>(&source_arena);
     *source->Add() = "1";
     *source->Add() = "2";
     Arena destination_arena;
     RepeatedPtrField<std::string>* destination =
-        Arena::CreateMessage<RepeatedPtrField<std::string>>(&destination_arena);
+        Arena::Create<RepeatedPtrField<std::string>>(&destination_arena);
     *destination->Add() = "3";
     *destination = std::move(*source);
     EXPECT_THAT(*destination, ElementsAre("1", "2"));
@@ -2051,7 +2038,7 @@ TEST(RepeatedPtrField, MoveAssign) {
   {
     Arena arena;
     RepeatedPtrField<std::string>* source =
-        Arena::CreateMessage<RepeatedPtrField<std::string>>(&arena);
+        Arena::Create<RepeatedPtrField<std::string>>(&arena);
     *source->Add() = "1";
     *source->Add() = "2";
     RepeatedPtrField<std::string> destination;
@@ -2068,7 +2055,7 @@ TEST(RepeatedPtrField, MoveAssign) {
     *source.Add() = "2";
     Arena arena;
     RepeatedPtrField<std::string>* destination =
-        Arena::CreateMessage<RepeatedPtrField<std::string>>(&arena);
+        Arena::Create<RepeatedPtrField<std::string>>(&arena);
     *destination->Add() = "3";
     *destination = std::move(source);
     EXPECT_THAT(*destination, ElementsAre("1", "2"));
@@ -2090,7 +2077,7 @@ TEST(RepeatedPtrField, MoveAssign) {
   {
     Arena arena;
     RepeatedPtrField<std::string>* field =
-        Arena::CreateMessage<RepeatedPtrField<std::string>>(&arena);
+        Arena::Create<RepeatedPtrField<std::string>>(&arena);
     *field->Add() = "1";
     *field->Add() = "2";
     const std::string* const* data = field->data();
@@ -2133,8 +2120,7 @@ TEST(RepeatedPtrField, ExtractSubrange) {
           // Create an array with "sz" elements and "extra" cleared elements.
           // Use an arena to avoid copies from debug-build stability checks.
           Arena arena;
-          auto& field =
-              *Arena::CreateMessage<RepeatedPtrField<std::string>>(&arena);
+          auto& field = *Arena::Create<RepeatedPtrField<std::string>>(&arena);
           for (int i = 0; i < sz + extra; ++i) {
             subject.push_back(new std::string());
             field.AddAllocated(subject[i]);
@@ -2192,14 +2178,12 @@ TEST(RepeatedPtrField, DeleteSubrange) {
 
 TEST(RepeatedPtrField, Cleanups) {
   Arena arena;
-  auto growth = internal::CleanupGrowth(arena, [&] {
-    Arena::CreateMessage<RepeatedPtrField<std::string>>(&arena);
-  });
+  auto growth = internal::CleanupGrowth(
+      arena, [&] { Arena::Create<RepeatedPtrField<std::string>>(&arena); });
   EXPECT_THAT(growth.cleanups, testing::IsEmpty());
 
-  growth = internal::CleanupGrowth(arena, [&] {
-    Arena::CreateMessage<RepeatedPtrField<TestAllTypes>>(&arena);
-  });
+  growth = internal::CleanupGrowth(
+      arena, [&] { Arena::Create<RepeatedPtrField<TestAllTypes>>(&arena); });
   EXPECT_THAT(growth.cleanups, testing::IsEmpty());
 }
 
@@ -2800,13 +2784,13 @@ TEST_F(RepeatedFieldInsertionIteratorsTest,
        UnsafeArenaAllocatedRepeatedPtrFieldWithStringIntData) {
   std::vector<Nested*> data;
   Arena arena;
-  auto* goldenproto = Arena::CreateMessage<TestAllTypes>(&arena);
+  auto* goldenproto = Arena::Create<TestAllTypes>(&arena);
   for (int i = 0; i < 10; ++i) {
     auto* new_data = goldenproto->add_repeated_nested_message();
     new_data->set_bb(i);
     data.push_back(new_data);
   }
-  auto* testproto = Arena::CreateMessage<TestAllTypes>(&arena);
+  auto* testproto = Arena::Create<TestAllTypes>(&arena);
   std::copy(data.begin(), data.end(),
             UnsafeArenaAllocatedRepeatedPtrFieldBackInserter(
                 testproto->mutable_repeated_nested_message()));
@@ -2817,13 +2801,13 @@ TEST_F(RepeatedFieldInsertionIteratorsTest,
        UnsafeArenaAllocatedRepeatedPtrFieldWithString) {
   std::vector<std::string*> data;
   Arena arena;
-  auto* goldenproto = Arena::CreateMessage<TestAllTypes>(&arena);
+  auto* goldenproto = Arena::Create<TestAllTypes>(&arena);
   for (int i = 0; i < 10; ++i) {
     auto* new_data = goldenproto->add_repeated_string();
     *new_data = absl::StrCat("name-", i);
     data.push_back(new_data);
   }
-  auto* testproto = Arena::CreateMessage<TestAllTypes>(&arena);
+  auto* testproto = Arena::Create<TestAllTypes>(&arena);
   std::copy(data.begin(), data.end(),
             UnsafeArenaAllocatedRepeatedPtrFieldBackInserter(
                 testproto->mutable_repeated_string()));

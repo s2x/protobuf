@@ -1,11 +1,14 @@
 # Protobuf Rust runtime packages.
 
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
-load("@rules_proto//proto:defs.bzl", "proto_lang_toolchain")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_filegroup", "pkg_files", "strip_prefix")
+load("@rules_pkg//pkg:zip.bzl", "pkg_zip")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//bazel/toolchains:proto_lang_toolchain.bzl", "proto_lang_toolchain")
 
 package(
     default_visibility = [
+        "//:__pkg__",  # "public" targets are alias rules in //.
         "//src/google/protobuf:__subpackages__",
     ],
 )
@@ -32,6 +35,7 @@ rust_library(
         ":use_upb_kernel": ["--cfg=upb_kernel"],
         "//conditions:default": ["--cfg=cpp_kernel"],
     }),
+    visibility = ["//visibility:public"],
     deps = select({
         ":use_upb_kernel": [":protobuf_upb"],
         "//conditions:default": [":protobuf_cpp"],
@@ -40,23 +44,27 @@ rust_library(
 
 # This list contains kernel-agnostic logic and simple kernel-specific logic controlled by
 # `#[cfg(...)]` attributes. That forces us to compile these files twice, once for each kernel. As a
-# result these files are included in both `:protobuf_upb` and `:protobuf_cpp`. This is in principle
-# identical to how we compile regular Rust source files twice (once for production, and once for
-# unittesting).
+# result these files are included in both `:protobuf_upb` and `:protobuf_cpp`.
+# This is in principle identical to how we compile regular Rust source files twice
+# (once for production, and once for unit testing).
 #
 # shared.rs is the root of the crate and has public items re-exported in protobuf.rs for user use.
 PROTOBUF_SHARED = [
+    # go/keep-sorted start
+    "codegen_traits.rs",
+    "cord.rs",
     "enum.rs",
     "internal.rs",
-    "macros.rs",
+    "map.rs",
     "optional.rs",
+    "prelude.rs",
     "primitive.rs",
+    "proto_macro.rs",
     "proxied.rs",
     "repeated.rs",
     "shared.rs",
     "string.rs",
-    "vtable.rs",
-    "map.rs",
+    # go/keep-sorted end
 ]
 
 # The Rust Protobuf runtime using the upb kernel.
@@ -71,24 +79,43 @@ rust_library(
     proc_macro_deps = [
         "@crate_index//:paste",
     ],
-    rustc_flags = ["--cfg=upb_kernel"],
+    rustc_flags = [
+        "--cfg=upb_kernel",
+        "--cfg=bzl",
+    ],
     visibility = [
         "//rust:__subpackages__",
         "//src/google/protobuf:__subpackages__",
     ],
     deps = [
         ":utf8",
-        "//rust/upb_kernel:upb_c_api",
+        "//rust/upb",
     ],
 )
 
 rust_test(
     name = "protobuf_upb_test",
     crate = ":protobuf_upb",
-    rustc_flags = ["--cfg=upb_kernel"],
+    rustc_flags = [
+        "--cfg=upb_kernel",
+        "--cfg=bzl",
+    ],
     deps = [
         "@crate_index//:googletest",
     ],
+)
+
+# This provides an identical set of re-exports as `:protobuf` with `:use_upb_kernel` active.
+# This is only used for tests shared between runtimes.
+rust_library(
+    name = "protobuf_upb_export",
+    testonly = True,
+    srcs = ["protobuf.rs"],
+    rustc_flags = ["--cfg=upb_kernel"],
+    visibility = [
+        "//src/google/protobuf:__subpackages__",
+    ],
+    deps = [":protobuf_upb"],
 )
 
 # The Rust Protobuf runtime using the cpp kernel.
@@ -113,8 +140,68 @@ rust_library(
 rust_test(
     name = "protobuf_cpp_test",
     crate = ":protobuf_cpp",
-    rustc_flags = ["--cfg=cpp_kernel"],
+    rustc_flags = [
+        "--cfg=cpp_kernel",
+        "--cfg=bzl",
+    ],
     deps = [
+        "@crate_index//:googletest",
+    ],
+)
+
+# This provides an identical set of re-exports as `:protobuf` with `:use_upb_kernel` inactive.
+# This is only used for tests shared between runtimes.
+rust_library(
+    name = "protobuf_cpp_export",
+    testonly = True,
+    srcs = ["protobuf.rs"],
+    rustc_flags = ["--cfg=cpp_kernel"],
+    visibility = [
+        "//src/google/protobuf:__subpackages__",
+    ],
+    deps = [":protobuf_cpp"],
+)
+
+alias(
+    name = "protobuf_gtest_matchers",
+    actual = select({
+        ":use_upb_kernel": ":protobuf_gtest_matchers_upb",
+        "//conditions:default": ":protobuf_gtest_matchers_cpp",
+    }),
+    visibility = [
+    ],
+)
+
+rust_library(
+    name = "protobuf_gtest_matchers_cpp",
+    testonly = True,
+    srcs = ["gtest_matchers.rs"],
+    aliases = {
+        "//rust:protobuf_cpp": "protobuf",
+    },
+    visibility = [
+        "//rust:__subpackages__",
+        "//src/google/protobuf:__subpackages__",
+    ],
+    deps = [
+        ":protobuf_cpp",
+        "@crate_index//:googletest",
+    ],
+)
+
+rust_library(
+    name = "protobuf_gtest_matchers_upb",
+    testonly = True,
+    srcs = ["gtest_matchers.rs"],
+    aliases = {
+        "//rust:protobuf_upb": "protobuf",
+    },
+    visibility = [
+        "//rust:__subpackages__",
+        "//src/google/protobuf:__subpackages__",
+    ],
+    deps = [
+        ":protobuf_upb",
         "@crate_index//:googletest",
     ],
 )
@@ -141,6 +228,11 @@ proto_lang_toolchain(
     visibility = ["//visibility:public"],
 )
 
+package_group(
+    name = "rust_proto_library_allowed_in_different_package",
+    packages = ["//rust/test"],  # for unittest proto_libraries
+)
+
 # This flag controls what kernel all Rust Protobufs are using in the current build.
 string_flag(
     name = "rust_proto_library_kernel",
@@ -156,4 +248,65 @@ config_setting(
     flag_values = {
         ":rust_proto_library_kernel": "upb",
     },
+)
+
+pkg_files(
+    name = "rust_protobuf_src",
+    srcs = glob(
+        [
+            "*",
+        ],
+    ),
+    strip_prefix = strip_prefix.from_root("rust"),
+    visibility = ["//:__pkg__"],
+)
+
+pkg_files(
+    name = "crate_root_files",
+    srcs = glob(["cargo/**/*"]),
+    strip_prefix = strip_prefix.from_root("rust/cargo"),
+    visibility = ["//:__pkg__"],
+)
+
+pkg_filegroup(
+    name = "rust_protobuf_src_dir",
+    srcs = [
+        ":rust_protobuf_src",
+        "//rust/upb:rust_protobuf_upb_src",
+    ],
+    prefix = "src",
+)
+
+pkg_files(
+    name = "amalgamated_upb",
+    srcs = ["//upb:gen_amalgamation"],
+    strip_prefix = strip_prefix.from_root(""),
+)
+
+pkg_filegroup(
+    name = "rust_protobuf_libupb_src",
+    srcs = [
+        ":amalgamated_upb",
+        "//upb/cmake:upb_cmake_dist",
+    ],
+    prefix = "libupb",
+)
+
+pkg_zip(
+    name = "rust_crate",
+    srcs = [
+        ":crate_root_files",
+        ":rust_protobuf_libupb_src",
+        ":rust_protobuf_src_dir",
+        "//:LICENSE",
+    ],
+)
+
+sh_binary(
+    name = "cargo_test",
+    srcs = ["cargo_test.sh"],
+    data = [
+        ":rust_crate",
+    ],
+    deps = ["@bazel_tools//tools/bash/runfiles"],
 )

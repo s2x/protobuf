@@ -179,34 +179,6 @@ public class JsonFormat {
     }
 
     /**
-     * Creates a new {@link Printer} that will always print fields unless they are a message type or
-     * in a oneof.
-     *
-     * <p>Note that this does print Proto2 Optional but does not print Proto3 Optional fields, as
-     * the latter is represented using a synthetic oneof.
-     *
-     * <p>The new Printer clones all other configurations from the current {@link Printer}.
-     *
-     * @deprecated Prefer {@link #alwaysPrintFieldsWithNoPresence}
-     */
-    @Deprecated
-    public Printer includingDefaultValueFields() {
-      if (shouldPrintDefaults != ShouldPrintDefaults.ONLY_IF_PRESENT) {
-        throw new IllegalStateException(
-            "JsonFormat includingDefaultValueFields has already been set.");
-      }
-      return new Printer(
-          registry,
-          oldRegistry,
-          ShouldPrintDefaults.ALWAYS_PRINT_EXCEPT_MESSAGES_AND_ONEOFS,
-          ImmutableSet.of(),
-          preservingProtoFieldNames,
-          omittingInsignificantWhitespace,
-          printingEnumsAsInts,
-          sortingMapKeys);
-    }
-
-    /**
      * Creates a new {@link Printer} that will also print default-valued fields if their
      * FieldDescriptors are found in the supplied set. Empty repeated fields and map fields will be
      * printed as well, if they match. The new Printer clones all other configurations from the
@@ -1818,7 +1790,7 @@ public class JsonFormat {
       try {
         BigDecimal decimalValue = new BigDecimal(json.getAsString());
         BigInteger value = decimalValue.toBigIntegerExact();
-        if (value.signum() < 0 || value.compareTo(new BigInteger("FFFFFFFF", 16)) > 0) {
+        if (value.signum() < 0 || value.compareTo(MAX_UINT32) > 0) {
           throw new InvalidProtocolBufferException("Out of range uint32 value: " + json);
         }
         return value.intValue();
@@ -1830,6 +1802,7 @@ public class JsonFormat {
       }
     }
 
+    private static final BigInteger MAX_UINT32 = new BigInteger("FFFFFFFF", 16);
     private static final BigInteger MAX_UINT64 = new BigInteger("FFFFFFFFFFFFFFFF", 16);
 
     private long parseUint64(JsonElement json) throws InvalidProtocolBufferException {

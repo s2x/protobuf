@@ -12,14 +12,17 @@
 #ifndef GOOGLE_PROTOBUF_COMPILER_CPP_FIELD_H__
 #define GOOGLE_PROTOBUF_COMPILER_CPP_FIELD_H__
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <tuple>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/absl_check.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/optional.h"
+#include "absl/types/span.h"
 #include "google/protobuf/compiler/cpp/helpers.h"
 #include "google/protobuf/compiler/cpp/options.h"
 #include "google/protobuf/descriptor.h"
@@ -44,7 +47,7 @@ class FieldGeneratorBase {
   // variable instead of calling GetArena()'
   enum class GeneratorFunction { kMergeFrom };
 
-  FieldGeneratorBase(const FieldDescriptor* descriptor, const Options& options,
+  FieldGeneratorBase(const FieldDescriptor* field, const Options& options,
                      MessageSCCAnalyzer* scc_analyzer);
 
   FieldGeneratorBase(const FieldGeneratorBase&) = delete;
@@ -65,6 +68,9 @@ class FieldGeneratorBase {
   // Returns true if the provided field has a trivial zero default.
   // I.e., the field can be initialized with `memset(&field, 0, sizeof(field))`
   bool has_trivial_zero_default() const { return has_trivial_zero_default_; }
+
+  // Returns true if the provided field can be initialized with `= {}`.
+  bool has_brace_default_assign() const { return has_brace_default_assign_; }
 
   // Returns true if the field is a singular or repeated message.
   // This includes group message types. To explicitly check if a message
@@ -139,7 +145,7 @@ class FieldGeneratorBase {
 
   virtual void GenerateArenaDestructorCode(io::Printer* p) const {
     ABSL_CHECK(NeedsArenaDestructor() == ArenaDtorNeeds::kNone)
-        << descriptor_->cpp_type_name();
+        << field_->cpp_type_name();
   }
 
   // Generates constexpr member initialization code, e.g.: `foo_{5}`.
@@ -179,7 +185,10 @@ class FieldGeneratorBase {
 
   virtual void GenerateByteSize(io::Printer* p) const = 0;
 
-  virtual void GenerateIsInitialized(io::Printer* p) const {}
+  virtual void GenerateIsInitialized(io::Printer* p) const {
+    ABSL_CHECK(!NeedsIsInitialized());
+  }
+  virtual bool NeedsIsInitialized() const { return false; }
 
   virtual bool IsInlined() const { return false; }
 
@@ -188,7 +197,7 @@ class FieldGeneratorBase {
   }
 
  protected:
-  const FieldDescriptor* descriptor_;
+  const FieldDescriptor* field_;
   const Options& options_;
   MessageSCCAnalyzer* scc_;
   absl::flat_hash_map<absl::string_view, std::string> variables_;
@@ -198,6 +207,7 @@ class FieldGeneratorBase {
   bool is_trivial_ = false;
   bool has_trivial_value_ = false;
   bool has_trivial_zero_default_ = false;
+  bool has_brace_default_assign_ = false;
   bool is_message_ = false;
   bool is_group_ = false;
   bool is_string_ = false;
@@ -248,6 +258,9 @@ class FieldGenerator {
   bool has_trivial_value() const { return impl_->has_trivial_value(); }
   bool has_trivial_zero_default() const {
     return impl_->has_trivial_zero_default();
+  }
+  bool has_brace_default_assign() const {
+    return impl_->has_brace_default_assign();
   }
   bool is_message() const { return impl_->is_message(); }
   bool is_group() const { return impl_->is_group(); }
@@ -471,6 +484,8 @@ class FieldGenerator {
     impl_->GenerateIsInitialized(p);
   }
 
+  bool NeedsIsInitialized() const { return impl_->NeedsIsInitialized(); }
+
   // TODO: Document this properly.
   bool IsInlined() const { return impl_->IsInlined(); }
 
@@ -507,7 +522,8 @@ class FieldGeneratorTable {
 
   const FieldGenerator& get(const FieldDescriptor* field) const {
     ABSL_CHECK_EQ(field->containing_type(), descriptor_);
-    return fields_[field->index()];
+    ABSL_DCHECK_GE(field->index(), 0);
+    return fields_[static_cast<size_t>(field->index())];
   }
 
  private:

@@ -8,9 +8,10 @@
 #include "google/protobuf/compiler/cpp/parse_function_generator.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
@@ -24,9 +25,6 @@
 #include "google/protobuf/descriptor.h"
 #include "google/protobuf/generated_message_tctable_gen.h"
 #include "google/protobuf/generated_message_tctable_impl.h"
-#include "google/protobuf/io/coded_stream.h"
-#include "google/protobuf/wire_format.h"
-#include "google/protobuf/wire_format_lite.h"
 
 namespace google {
 namespace protobuf {
@@ -36,23 +34,6 @@ namespace cpp {
 namespace {
 using internal::TailCallTableInfo;
 using internal::cpp::Utf8CheckMode;
-using google::protobuf::internal::WireFormat;
-using google::protobuf::internal::WireFormatLite;
-
-bool HasWeakFields(const Descriptor* descriptor) {
-  for (int i = 0; i < descriptor->field_count(); i++) {
-    if (descriptor->field(i)->options().weak()) {
-      return true;
-    }
-  }
-  return false;
-}
-bool UseDirectTcParserTable(const FieldDescriptor* field,
-                            const Options& options) {
-  if (field->cpp_type() != field->CPPTYPE_MESSAGE) return false;
-  auto* m = field->message_type();
-  return !m->options().message_set_wire_format() && !HasTracker(m, options);
-}
 
 std::vector<const FieldDescriptor*> GetOrderedFields(
     const Descriptor* descriptor, const Options& options) {
@@ -69,33 +50,6 @@ std::vector<const FieldDescriptor*> GetOrderedFields(
 
 }  // namespace
 
-class ParseFunctionGenerator::GeneratedOptionProvider final
-    : public internal::TailCallTableInfo::OptionProvider {
- public:
-  explicit GeneratedOptionProvider(ParseFunctionGenerator* gen) : gen_(gen) {}
-  TailCallTableInfo::PerFieldOptions GetForField(
-      const FieldDescriptor* field) const final {
-    const auto verify_flag = [&] {
-      if (IsEagerlyVerifiedLazy(field, gen_->options_, gen_->scc_analyzer_))
-        return internal::field_layout::kTvEager;
-      if (IsLazilyVerifiedLazy(field, gen_->options_))
-        return internal::field_layout::kTvLazy;
-      return internal::field_layout::TransformValidation{};
-    };
-    return {
-        GetPresenceProbability(field, gen_->options_),
-        verify_flag(),
-        IsStringInlined(field, gen_->options_),
-        IsImplicitWeakField(field, gen_->options_, gen_->scc_analyzer_),
-        UseDirectTcParserTable(field, gen_->options_),
-        ShouldSplit(field, gen_->options_),
-    };
-  }
-
- private:
-  ParseFunctionGenerator* gen_;
-};
-
 ParseFunctionGenerator::ParseFunctionGenerator(
     const Descriptor* descriptor, int max_has_bit_index,
     const std::vector<int>& has_bit_indices,
@@ -111,54 +65,36 @@ ParseFunctionGenerator::ParseFunctionGenerator(
       ordered_fields_(GetOrderedFields(descriptor_, options_)),
       num_hasbits_(max_has_bit_index),
       index_in_file_messages_(index_in_file_messages) {
-  tc_table_info_.reset(new TailCallTableInfo(
-      descriptor_, ordered_fields_,
-      {/* is_lite */ GetOptimizeFor(descriptor->file(), options_) ==
-           FileOptions::LITE_RUNTIME,
-       /* uses_codegen */ true, options_.profile_driven_cluster_aux_subtable},
-      GeneratedOptionProvider(this), has_bit_indices, inlined_string_indices));
+  std::vector<TailCallTableInfo::FieldOptions> fields;
+  fields.reserve(ordered_fields_.size());
+  for (size_t i = 0; i < ordered_fields_.size(); ++i) {
+    auto* field = ordered_fields_[i];
+    ABSL_CHECK_GE(field->index(), 0);
+    size_t index = static_cast<size_t>(field->index());
+    fields.push_back({
+        field,
+        index < has_bit_indices.size() ? has_bit_indices[index] : -1,
+        GetPresenceProbability(field, options_),
+        GetLazyStyle(field, options_, scc_analyzer_),
+        IsStringInlined(field, options_),
+        IsImplicitWeakField(field, options_, scc_analyzer_),
+        /* use_direct_tcparser_table */ true,
+        ShouldSplit(field, options_),
+        index < inlined_string_indices.size() ? inlined_string_indices[index]
+                                              : -1,
+    });
+  }
+  tc_table_info_ = std::make_unique<TailCallTableInfo>(
+      descriptor_,
+      TailCallTableInfo::MessageOptions{
+          /* is_lite */ GetOptimizeFor(descriptor->file(), options_) ==
+              FileOptions::LITE_RUNTIME,
+          /* uses_codegen */ true,
+          options_.profile_driven_cluster_aux_subtable},
+      fields);
   SetCommonMessageDataVariables(descriptor_, &variables_);
   SetUnknownFieldsVariable(descriptor_, options_, &variables_);
   variables_["classname"] = ClassName(descriptor, false);
-}
-
-void ParseFunctionGenerator::GenerateMethodDecls(io::Printer* printer) {
-  Formatter format(printer, variables_);
-  format(
-      "const char* _InternalParse(const char* ptr, "
-      "::$proto_ns$::internal::ParseContext* ctx) final;\n");
-}
-
-void ParseFunctionGenerator::GenerateMethodImpls(io::Printer* printer) {
-  Formatter format(printer, variables_);
-  if (descriptor_->options().message_set_wire_format()) {
-    // Special-case MessageSet.
-    format(
-        "const char* $classname$::_InternalParse(const char* ptr,\n"
-        "                  ::_pbi::ParseContext* ctx) {\n"
-        "$annotate_deserialize$");
-    if (ShouldVerify(descriptor_, options_, scc_analyzer_)) {
-      format(
-          "  ctx->set_lazy_eager_verify_func(&$classname$::InternalVerify);\n");
-    }
-    format(
-        "  return $extensions$.ParseMessageSet(ptr, \n"
-        "      internal_default_instance(), &_internal_metadata_, ctx);\n"
-        "}\n");
-    return;
-  }
-  GenerateTailcallParseFunction(format);
-}
-
-void ParseFunctionGenerator::GenerateTailcallParseFunction(Formatter& format) {
-  // Generate an `_InternalParse` that starts the tail-calling loop.
-  format(
-      "const char* $classname$::_InternalParse(\n"
-      "    const char* ptr, ::_pbi::ParseContext* ctx) {\n"
-      "$annotate_deserialize$"
-      "  ptr = ::_pbi::TcParser::ParseLoop(this, ptr, ctx, &_table_.header);\n"
-      "  return ptr;\n"
-      "}\n\n");
 }
 
 struct SkipEntry16 {
@@ -189,7 +125,7 @@ static NumToEntryTable MakeNumToEntryTable(
 static int FieldNameDataSize(const std::vector<uint8_t>& data) {
   // We add a +1 here to allow for a NUL termination character. It makes the
   // codegen nicer.
-  return data.empty() ? 0 : data.size() + 1;
+  return data.empty() ? 0 : static_cast<int>(data.size()) + 1;
 }
 
 void ParseFunctionGenerator::GenerateDataDecls(io::Printer* p) {
@@ -268,7 +204,7 @@ static NumToEntryTable MakeNumToEntryTable(
   uint32_t last_skip_entry_start = 0;
   for (; field_entry_index != N; ++field_entry_index) {
     auto* field_descriptor = field_descriptors[field_entry_index];
-    uint32_t fnum = field_descriptor->number();
+    uint32_t fnum = static_cast<uint32_t>(field_descriptor->number());
     ABSL_CHECK_GT(fnum, last_skip_entry_start);
     if (start_new_block == false) {
       // If the next field number is within 15 of the last_skip_entry_start, we
@@ -301,20 +237,20 @@ static NumToEntryTable MakeNumToEntryTable(
   return num_to_entry_table;
 }
 
+static std::string TcParseFunctionName(internal::TcParseFunction func) {
+#define PROTOBUF_TC_PARSE_FUNCTION_X(value) #value,
+  static constexpr absl::string_view kNames[] = {
+      {}, PROTOBUF_TC_PARSE_FUNCTION_LIST};
+#undef PROTOBUF_TC_PARSE_FUNCTION_X
+  const int func_index = static_cast<int>(func);
+  ABSL_CHECK_GE(func_index, 0);
+  ABSL_CHECK_LT(func_index, std::end(kNames) - std::begin(kNames));
+  static constexpr absl::string_view ns = "::_pbi::TcParser::";
+  return absl::StrCat(ns, kNames[func_index]);
+}
+
 void ParseFunctionGenerator::GenerateTailCallTable(io::Printer* printer) {
   Formatter format(printer, variables_);
-  // All entries without a fast-path parsing function need a fallback.
-  std::string fallback = "::_pbi::TcParser::GenericFallback";
-  if (GetOptimizeFor(descriptor_->file(), options_) ==
-      FileOptions::LITE_RUNTIME) {
-    absl::StrAppend(&fallback, "Lite");
-  } else if (HasWeakFields(descriptor_)) {
-    // weak=true fields are handled with the reflection fallback, but we don't
-    // want to install that for normal messages because it has more overhead.
-    ABSL_CHECK(HasDescriptorMethods(descriptor_->file(), options_));
-    fallback = "::_pbi::TcParser::ReflectionFallback";
-  }
-
   // For simplicity and speed, the table is not covering all proto
   // configurations. This model uses a fallback to cover all situations that
   // the table can't accommodate, together with unknown fields or extensions.
@@ -377,7 +313,7 @@ void ParseFunctionGenerator::GenerateTailCallTable(io::Printer* printer) {
       } else {
         format("offsetof(decltype(_table_), aux_entries),\n");
       }
-      format("&$1$._instance,\n", DefaultInstanceName(descriptor_, options_));
+      format("_class_data_.base(),\n");
       if (NeedsPostLoopHandler(descriptor_, options_)) {
         printer->Emit(R"cc(
           &$classname$::PostLoopHandler,
@@ -387,7 +323,8 @@ void ParseFunctionGenerator::GenerateTailCallTable(io::Printer* printer) {
           nullptr,  // post_loop_handler
         )cc");
       }
-      format("$1$,  // fallback\n", fallback);
+      format("$1$,  // fallback\n",
+             TcParseFunctionName(tc_table_info_->fallback_function));
       std::vector<const FieldDescriptor*> subtable_fields;
       for (const auto& aux : tc_table_info_->aux_entries) {
         if (aux.type == internal::TailCallTableInfo::kSubTable) {
@@ -421,8 +358,7 @@ void ParseFunctionGenerator::GenerateTailCallTable(io::Printer* printer) {
       // field_lookup_table[]
       auto field_lookup_scope = format.ScopedIndent();
       int line_entries = 0;
-      for (int i = 0, N = field_num_to_entry_table.blocks.size(); i < N; ++i) {
-        SkipEntryBlock& entry_block = field_num_to_entry_table.blocks[i];
+      for (auto& entry_block : field_num_to_entry_table.blocks) {
         format("$1$, $2$, $3$,\n", entry_block.first_fnum & 65535,
                entry_block.first_fnum / 65536, entry_block.entries.size());
         for (auto se16 : entry_block.entries) {
@@ -441,7 +377,8 @@ void ParseFunctionGenerator::GenerateTailCallTable(io::Printer* printer) {
       if (line_entries) format("\n");
       format("65535, 65535\n");
     }
-    if (ordered_fields_.empty()) {
+    if (ordered_fields_.empty() &&
+        !descriptor_->options().message_set_wire_format()) {
       ABSL_DLOG_IF(FATAL, !tc_table_info_->aux_entries.empty())
           << "Invalid message: " << descriptor_->full_name() << " has "
           << tc_table_info_->aux_entries.size()
@@ -504,6 +441,13 @@ void ParseFunctionGenerator::GenerateTailCallTable(io::Printer* printer) {
                        QualifiedClassName(aux_entry.field->message_type(),
                                           options_));
                 break;
+              case TailCallTableInfo::kSelfVerifyFunc:
+                if (ShouldVerify(descriptor_, options_, scc_analyzer_)) {
+                  format("{&InternalVerify},\n");
+                } else {
+                  format("{},\n");
+                }
+                break;
               case TailCallTableInfo::kEnumRange:
                 format("{$1$, $2$},\n", aux_entry.enum_range.start,
                        aux_entry.enum_range.size);
@@ -532,10 +476,8 @@ void ParseFunctionGenerator::GenerateTailCallTable(io::Printer* printer) {
                         {"field", FieldMemberName(
                                       aux_entry.field,
                                       ShouldSplit(aux_entry.field, options_))},
-                        {"strict",
-                         utf8_check == internal::cpp::Utf8CheckMode::kStrict},
-                        {"verify",
-                         utf8_check == internal::cpp::Utf8CheckMode::kVerify},
+                        {"strict", utf8_check == Utf8CheckMode::kStrict},
+                        {"verify", utf8_check == Utf8CheckMode::kVerify},
                         {"validate", validated_enum},
                         {"key_wire", map_key->type()},
                         {"value_wire", map_value->type()},
@@ -548,10 +490,6 @@ void ParseFunctionGenerator::GenerateTailCallTable(io::Printer* printer) {
                     )cc");
                 break;
               }
-              case TailCallTableInfo::kCreateInArena:
-                format("{::_pbi::TcParser::CreateInArenaStorageCb<$1$>},\n",
-                       QualifiedClassName(aux_entry.desc, options_));
-                break;
             }
           }
         }
@@ -566,18 +504,6 @@ void ParseFunctionGenerator::GenerateTailCallTable(io::Printer* printer) {
     format("}},\n");
   }
   format("};\n\n");  // _table_
-}
-
-static std::string TcParseFunctionName(internal::TcParseFunction func) {
-#define PROTOBUF_TC_PARSE_FUNCTION_X(value) #value,
-  static constexpr absl::string_view kNames[] = {
-      {}, PROTOBUF_TC_PARSE_FUNCTION_LIST};
-#undef PROTOBUF_TC_PARSE_FUNCTION_X
-  const int func_index = static_cast<int>(func);
-  ABSL_CHECK_GE(func_index, 0);
-  ABSL_CHECK_LT(func_index, std::end(kNames) - std::begin(kNames));
-  static constexpr absl::string_view ns = "::_pbi::TcParser::";
-  return absl::StrCat(ns, kNames[func_index]);
 }
 
 void ParseFunctionGenerator::GenerateFastFieldEntries(Formatter& format) {
@@ -643,7 +569,7 @@ void ParseFunctionGenerator::GenerateFieldEntries(Formatter& format) {
                absl::StrCat(FieldName(field), "_"));
       } else {
         format("PROTOBUF_FIELD_OFFSET($classname$, $1$), ",
-               FieldMemberName(field, /*cold=*/false));
+               FieldMemberName(field, /*split=*/false));
       }
       if (oneof) {
         format("_Internal::kOneofCaseOffset + $1$, ", 4 * oneof->index());
@@ -676,7 +602,7 @@ void ParseFunctionGenerator::GenerateFieldNames(Formatter& format) {
   // have a literal string than an initializer list of chars.
 
   const int total_sizes =
-      static_cast<int>(((tc_table_info_->field_entries.size() + 1) + 7) & ~7);
+      static_cast<int>(((tc_table_info_->field_entries.size() + 1) + 7) & ~7u);
   const uint8_t* p = tc_table_info_->field_name_data.data();
   const uint8_t* sizes = p;
   const uint8_t* sizes_end = sizes + total_sizes;

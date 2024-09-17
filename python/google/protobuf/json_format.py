@@ -70,9 +70,14 @@ class ParseError(Error):
   """Thrown in case of parsing error."""
 
 
+class EnumStringValueParseError(ParseError):
+  """Thrown if unknown string enum value is encountered.
+  This exception is suppressed if ignore_unknown_fields is set.
+  """
+
+
 def MessageToJson(
     message,
-    including_default_value_fields=False,
     preserving_proto_field_name=False,
     indent=2,
     sort_keys=False,
@@ -86,12 +91,6 @@ def MessageToJson(
 
   Args:
     message: The protocol buffers message instance to serialize.
-    including_default_value_fields: (DEPRECATED: use
-      always_print_fields_with_no_presence which correctly treats proto2
-      and proto3 optionals the same). If True, fields without presence (implicit
-      presence scalars, repeated fields, and map fields) and Proto2 optional
-      scalars will always be serialized. Singular message fields, oneof fields
-      and Proto3 optional scalars are not affected by this option.
     always_print_fields_with_no_presence: If True, fields without
       presence (implicit presence scalars, repeated fields, and map fields) will
       always be serialized. Any field that supports presence is not affected by
@@ -114,7 +113,6 @@ def MessageToJson(
     A string containing the JSON formatted protocol buffer message.
   """
   printer = _Printer(
-      including_default_value_fields,
       preserving_proto_field_name,
       use_integers_for_enums,
       descriptor_pool,
@@ -126,7 +124,6 @@ def MessageToJson(
 
 def MessageToDict(
     message,
-    including_default_value_fields=False,
     always_print_fields_with_no_presence=False,
     preserving_proto_field_name=False,
     use_integers_for_enums=False,
@@ -139,12 +136,6 @@ def MessageToDict(
 
   Args:
     message: The protocol buffers message instance to serialize.
-    including_default_value_fields: (DEPRECATED: use
-      always_print_fields_with_no_presence to correctly treats proto2
-      and proto3 optional the same). If True, fields without presence (implicit
-      presence scalars, repeated fields, and map fields) and Proto2 optional
-      scalars will always be serialized. Singular message fields, oneof fields
-      and Proto3 optional scalars are not affected by this option.
     always_print_fields_with_no_presence: If True, fields without
       presence (implicit presence scalars, repeated fields, and map fields) will
       always be serialized. Any field that supports presence is not affected by
@@ -161,7 +152,6 @@ def MessageToDict(
     A dict representation of the protocol buffer message.
   """
   printer = _Printer(
-      including_default_value_fields,
       preserving_proto_field_name,
       use_integers_for_enums,
       descriptor_pool,
@@ -185,14 +175,12 @@ class _Printer(object):
 
   def __init__(
       self,
-      including_default_value_fields=False,
       preserving_proto_field_name=False,
       use_integers_for_enums=False,
       descriptor_pool=None,
       float_precision=None,
       always_print_fields_with_no_presence=False,
   ):
-    self.including_default_value_fields = including_default_value_fields
     self.always_print_fields_with_no_presence = (
         always_print_fields_with_no_presence
     )
@@ -256,23 +244,10 @@ class _Printer(object):
 
       # Serialize default value if including_default_value_fields is True.
       if (
-          self.including_default_value_fields
-          or self.always_print_fields_with_no_presence
+          self.always_print_fields_with_no_presence
       ):
         message_descriptor = message.DESCRIPTOR
         for field in message_descriptor.fields:
-          # including_default_value doesn't apply to singular messages or any
-          # field with a containing oneof (including proto3 optionals which use
-          # a synthetic oneof).
-          if self.including_default_value_fields and (
-              (
-                  field.label != descriptor.FieldDescriptor.LABEL_REPEATED
-                  and field.cpp_type
-                  == descriptor.FieldDescriptor.CPPTYPE_MESSAGE
-              )
-              or field.containing_oneof
-          ):
-            continue
 
           # always_print_fields_with_no_presence doesn't apply to
           # any field which supports presence.
@@ -328,7 +303,7 @@ class _Printer(object):
         # Use base64 Data encoding for bytes
         return base64.b64encode(value).decode('utf-8')
       else:
-        return value
+        return str(value)
     elif field.cpp_type == descriptor.FieldDescriptor.CPPTYPE_BOOL:
       return bool(value)
     elif field.cpp_type in _INT64_TYPES:
@@ -476,13 +451,22 @@ def Parse(
   """
   if not isinstance(text, str):
     text = text.decode('utf-8')
+
   try:
     js = json.loads(text, object_pairs_hook=_DuplicateChecker)
-  except ValueError as e:
+  except Exception as e:
     raise ParseError('Failed to load JSON: {0}.'.format(str(e))) from e
-  return ParseDict(
-      js, message, ignore_unknown_fields, descriptor_pool, max_recursion_depth
-  )
+
+  try:
+    return ParseDict(
+        js, message, ignore_unknown_fields, descriptor_pool, max_recursion_depth
+    )
+  except ParseError as e:
+    raise e
+  except Exception as e:
+    raise ParseError(
+        'Failed to parse JSON: {0}: {1}.'.format(type(e).__name__, str(e))
+    ) from e
 
 
 def ParseDict(
@@ -689,11 +673,8 @@ class _Parser(object):
                         path, name, index
                     )
                 )
-              getattr(message, field.name).append(
-                  _ConvertScalarFieldValue(
-                      item, field, '{0}.{1}[{2}]'.format(path, name, index)
-                  )
-              )
+              self._ConvertAndAppendScalar(
+                message, field, item, '{0}.{1}[{2}]'.format(path, name, index))
         elif field.cpp_type == descriptor.FieldDescriptor.CPPTYPE_MESSAGE:
           if field.is_extension:
             sub_message = message.Extensions[field]
@@ -703,17 +684,9 @@ class _Parser(object):
           self.ConvertMessage(value, sub_message, '{0}.{1}'.format(path, name))
         else:
           if field.is_extension:
-            message.Extensions[field] = _ConvertScalarFieldValue(
-                value, field, '{0}.{1}'.format(path, name)
-            )
+            self._ConvertAndSetScalarExtension(message, field, value, '{0}.{1}'.format(path, name))
           else:
-            setattr(
-                message,
-                field.name,
-                _ConvertScalarFieldValue(
-                    value, field, '{0}.{1}'.format(path, name)
-                ),
-            )
+            self._ConvertAndSetScalar(message, field, value, '{0}.{1}'.format(path, name))
       except ParseError as e:
         if field and field.containing_oneof is None:
           raise ParseError(
@@ -826,11 +799,7 @@ class _Parser(object):
   def _ConvertWrapperMessage(self, value, message, path):
     """Convert a JSON representation into Wrapper message."""
     field = message.DESCRIPTOR.fields_by_name['value']
-    setattr(
-        message,
-        'value',
-        _ConvertScalarFieldValue(value, field, path='{0}.value'.format(path)),
-    )
+    self._ConvertAndSetScalar(message, field, value, path='{0}.value'.format(path))
 
   def _ConvertMapFieldValue(self, value, message, field, path):
     """Convert map field value for a message map field.
@@ -863,9 +832,51 @@ class _Parser(object):
             '{0}[{1}]'.format(path, key_value),
         )
       else:
-        getattr(message, field.name)[key_value] = _ConvertScalarFieldValue(
-            value[key], value_field, path='{0}[{1}]'.format(path, key_value)
-        )
+        self._ConvertAndSetScalarToMapKey(
+            message,
+            field,
+            key_value,
+            value[key],
+            path='{0}[{1}]'.format(path, key_value))
+
+  def _ConvertAndSetScalarExtension(self, message, extension_field, js_value, path):
+    """Convert scalar from js_value and assign it to message.Extensions[extension_field]."""
+    try:
+      message.Extensions[extension_field] = _ConvertScalarFieldValue(
+          js_value, extension_field, path)
+    except EnumStringValueParseError:
+      if not self.ignore_unknown_fields:
+        raise
+
+  def _ConvertAndSetScalar(self, message, field, js_value, path):
+    """Convert scalar from js_value and assign it to message.field."""
+    try:
+      setattr(
+          message,
+          field.name,
+          _ConvertScalarFieldValue(js_value, field, path))
+    except EnumStringValueParseError:
+      if not self.ignore_unknown_fields:
+        raise
+
+  def _ConvertAndAppendScalar(self, message, repeated_field, js_value, path):
+    """Convert scalar from js_value and append it to message.repeated_field."""
+    try:
+      getattr(message, repeated_field.name).append(
+          _ConvertScalarFieldValue(js_value, repeated_field, path))
+    except EnumStringValueParseError:
+      if not self.ignore_unknown_fields:
+        raise
+
+  def _ConvertAndSetScalarToMapKey(self, message, map_field, converted_key, js_value, path):
+    """Convert scalar from 'js_value' and add it to message.map_field[converted_key]."""
+    try:
+      getattr(message, map_field.name)[converted_key] = _ConvertScalarFieldValue(
+          js_value, map_field.message_type.fields_by_name['value'], path,
+      )
+    except EnumStringValueParseError:
+      if not self.ignore_unknown_fields:
+        raise
 
 
 def _ConvertScalarFieldValue(value, field, path, require_str=False):
@@ -882,6 +893,7 @@ def _ConvertScalarFieldValue(value, field, path, require_str=False):
 
   Raises:
     ParseError: In case of convert problems.
+    EnumStringValueParseError: In case of unknown enum string value.
   """
   try:
     if field.cpp_type in _INT_TYPES:
@@ -913,7 +925,9 @@ def _ConvertScalarFieldValue(value, field, path, require_str=False):
           number = int(value)
           enum_value = field.enum_type.values_by_number.get(number, None)
         except ValueError as e:
-          raise ParseError(
+          # Since parsing to integer failed and lookup in values_by_name didn't
+          # find this name, we have an enum string value which is unknown.
+          raise EnumStringValueParseError(
               'Invalid enum value {0} for enum type {1}'.format(
                   value, field.enum_type.full_name
               )
@@ -928,6 +942,8 @@ def _ConvertScalarFieldValue(value, field, path, require_str=False):
           else:
             return number
       return enum_value.number
+  except EnumStringValueParseError as e:
+    raise EnumStringValueParseError('{0} at {1}'.format(e, path)) from e
   except ParseError as e:
     raise ParseError('{0} at {1}'.format(e, path)) from e
 

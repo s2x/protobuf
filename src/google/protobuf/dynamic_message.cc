@@ -43,9 +43,13 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <memory>
 #include <new>
+#include <string>
 
+#include "absl/log/absl_check.h"
 #include "google/protobuf/arenastring.h"
 #include "google/protobuf/descriptor.h"
 #include "google/protobuf/descriptor.pb.h"
@@ -53,9 +57,7 @@
 #include "google/protobuf/generated_message_reflection.h"
 #include "google/protobuf/generated_message_util.h"
 #include "google/protobuf/map_field.h"
-#include "google/protobuf/map_field_inl.h"
-#include "google/protobuf/map_type_handler.h"
-#include "google/protobuf/reflection_ops.h"
+#include "google/protobuf/message_lite.h"
 #include "google/protobuf/repeated_field.h"
 #include "google/protobuf/unknown_field_set.h"
 #include "google/protobuf/wire_format.h"
@@ -179,14 +181,12 @@ inline int AlignOffset(int offset) { return AlignTo(offset, kSafeAlignment); }
 
 class DynamicMessage final : public Message {
  public:
-  explicit DynamicMessage(const DynamicMessageFactory::TypeInfo* type_info);
-
   // This should only be used by GetPrototypeNoLock() to avoid dead lock.
   DynamicMessage(DynamicMessageFactory::TypeInfo* type_info, bool lock_factory);
   DynamicMessage(const DynamicMessage&) = delete;
   DynamicMessage& operator=(const DynamicMessage&) = delete;
 
-  ~DynamicMessage() override;
+  ~DynamicMessage() PROTOBUF_FINAL;
 
   // Called on the prototype after construction to initialize message fields.
   // Cross linking the default instances allows for fast reflection access of
@@ -200,9 +200,7 @@ class DynamicMessage final : public Message {
 
   // implements Message ----------------------------------------------
 
-  Message* New(Arena* arena) const override;
-
-  const ClassData* GetClassData() const final;
+  const ClassData* GetClassData() const PROTOBUF_FINAL;
 
 #if defined(__cpp_lib_destroying_delete) && defined(__cpp_sized_deallocation)
   static void operator delete(DynamicMessage* msg, std::destroying_delete_t);
@@ -235,6 +233,9 @@ class DynamicMessage final : public Message {
     return reinterpret_cast<const uint8_t*>(this) + offset;
   }
 
+  static void* NewImpl(const void* prototype, void* mem, Arena* arena);
+  static void DestroyImpl(MessageLite& ptr);
+
   void* MutableRaw(int i);
   void* MutableExtensionsRaw();
   void* MutableWeakFieldMapRaw();
@@ -242,11 +243,10 @@ class DynamicMessage final : public Message {
   void* MutableOneofFieldRaw(const FieldDescriptor* f);
 
   const DynamicMessageFactory::TypeInfo* type_info_;
-  mutable internal::CachedSize cached_byte_size_;
+  internal::CachedSize cached_byte_size_;
 };
 
 struct DynamicMessageFactory::TypeInfo {
-  int size;
   int has_bits_offset;
   int oneof_case_offset;
   int extensions_offset;
@@ -259,29 +259,32 @@ struct DynamicMessageFactory::TypeInfo {
   //   important (the prototype must be deleted *before* the offsets).
   std::unique_ptr<uint32_t[]> offsets;
   std::unique_ptr<uint32_t[]> has_bits_indices;
-  // Don't use a unique_ptr to hold the prototype: the destructor for
-  // DynamicMessage needs to know whether it is the prototype, and does so by
-  // looking back at this field. This would assume details about the
-  // implementation of unique_ptr.
-  const DynamicMessage* prototype;
   int weak_field_map_offset;  // The offset for the weak_field_map;
 
   DynamicMessage::ClassDataFull class_data = {
-      {
+      DynamicMessage::ClassData{
+          nullptr,  // default_instance
+          nullptr,  // tc_table
           nullptr,  // on_demand_register_arena_dtor
+          &DynamicMessage::IsInitializedImpl,
+          &DynamicMessage::MergeImpl,
+          internal::MessageCreator(),  // to be filled later
+          &DynamicMessage::DestroyImpl,
+          static_cast<void (MessageLite::*)()>(&DynamicMessage::ClearImpl),
+          DynamicMessage::ByteSizeLongImpl,
+          DynamicMessage::_InternalSerializeImpl,
           PROTOBUF_FIELD_OFFSET(DynamicMessage, cached_byte_size_),
           false,
       },
-      &DynamicMessage::MergeImpl,
       &DynamicMessage::kDescriptorMethods,
       nullptr,  // descriptor_table
       nullptr,  // get_metadata_tracker
   };
 
-  TypeInfo() : prototype(nullptr) {}
+  TypeInfo() = default;
 
   ~TypeInfo() {
-    delete prototype;
+    delete class_data.prototype;
     delete class_data.reflection;
 
     auto* type = class_data.descriptor;
@@ -300,27 +303,26 @@ struct DynamicMessageFactory::TypeInfo {
   }
 };
 
-DynamicMessage::DynamicMessage(const DynamicMessageFactory::TypeInfo* type_info)
-    : type_info_(type_info), cached_byte_size_(0) {
-  SharedCtor(true);
-}
-
 DynamicMessage::DynamicMessage(const DynamicMessageFactory::TypeInfo* type_info,
                                Arena* arena)
-    : Message(arena), type_info_(type_info), cached_byte_size_(0) {
+    : Message(arena, type_info->class_data.base()),
+      type_info_(type_info),
+      cached_byte_size_(0) {
   SharedCtor(true);
 }
 
 DynamicMessage::DynamicMessage(DynamicMessageFactory::TypeInfo* type_info,
                                bool lock_factory)
-    : type_info_(type_info), cached_byte_size_(0) {
+    : Message(type_info->class_data.base()),
+      type_info_(type_info),
+      cached_byte_size_(0) {
   // The prototype in type_info has to be set before creating the prototype
   // instance on memory. e.g., message Foo { map<int32_t, Foo> a = 1; }. When
   // creating prototype for Foo, prototype of the map entry will also be
   // created, which needs the address of the prototype of Foo (the value in
   // map). To break the cyclic dependency, we have to assign the address of
   // prototype into type_info first.
-  type_info->prototype = this;
+  type_info->class_data.prototype = this;
   SharedCtor(lock_factory);
 }
 
@@ -450,16 +452,16 @@ void DynamicMessage::SharedCtor(bool lock_factory) {
 }
 
 bool DynamicMessage::is_prototype() const {
-  return type_info_->prototype == this ||
+  return type_info_->class_data.prototype == this ||
          // If type_info_->prototype is nullptr, then we must be constructing
          // the prototype now, which means we must be the prototype.
-         type_info_->prototype == nullptr;
+         type_info_->class_data.prototype == nullptr;
 }
 
 #if defined(__cpp_lib_destroying_delete) && defined(__cpp_sized_deallocation)
 void DynamicMessage::operator delete(DynamicMessage* msg,
                                      std::destroying_delete_t) {
-  const size_t size = msg->type_info_->size;
+  const size_t size = msg->type_info_->class_data.allocation_size();
   msg->~DynamicMessage();
   ::operator delete(msg, size);
 }
@@ -561,6 +563,17 @@ DynamicMessage::~DynamicMessage() {
   }
 }
 
+void* DynamicMessage::NewImpl(const void* prototype, void* mem, Arena* arena) {
+  const auto* type_info =
+      static_cast<const DynamicMessage*>(prototype)->type_info_;
+  memset(mem, 0, type_info->class_data.allocation_size());
+  return new (mem) DynamicMessage(type_info, arena);
+}
+
+void DynamicMessage::DestroyImpl(MessageLite& msg) {
+  static_cast<DynamicMessage&>(msg).~DynamicMessage();
+}
+
 void DynamicMessage::CrossLinkPrototypes() {
   // This should only be called on the prototype message.
   ABSL_CHECK(is_prototype());
@@ -585,18 +598,6 @@ void DynamicMessage::CrossLinkPrototypes() {
   }
 }
 
-Message* DynamicMessage::New(Arena* arena) const {
-  if (arena != nullptr) {
-    void* new_base = Arena::CreateArray<char>(arena, type_info_->size);
-    memset(new_base, 0, type_info_->size);
-    return new (new_base) DynamicMessage(type_info_, arena);
-  } else {
-    void* new_base = operator new(type_info_->size);
-    memset(new_base, 0, type_info_->size);
-    return new (new_base) DynamicMessage(type_info_);
-  }
-}
-
 const MessageLite::ClassData* DynamicMessage::GetClassData() const {
   return type_info_->class_data.base();
 }
@@ -616,6 +617,7 @@ DynamicMessageFactory::~DynamicMessageFactory() {
 }
 
 const Message* DynamicMessageFactory::GetPrototype(const Descriptor* type) {
+  ABSL_CHECK(type != nullptr);
   absl::MutexLock lock(&prototypes_mutex_);
   return GetPrototypeNoLock(type);
 }
@@ -632,13 +634,14 @@ const Message* DynamicMessageFactory::GetPrototypeNoLock(
   const TypeInfo** target = &prototypes_[type];
   if (*target != nullptr) {
     // Already exists.
-    return (*target)->prototype;
+    return static_cast<const Message*>((*target)->class_data.prototype);
   }
 
   TypeInfo* type_info = new TypeInfo;
   *target = type_info;
 
   type_info->class_data.descriptor = type;
+  type_info->class_data.is_dynamic = true;
   type_info->pool = (pool_ == nullptr) ? type->file()->pool() : pool_;
   type_info->factory = this;
 
@@ -727,9 +730,8 @@ const Message* DynamicMessageFactory::GetPrototypeNoLock(
 
   type_info->weak_field_map_offset = -1;
 
-  // Align the final size to make sure no clever allocators think that
-  // alignment is not necessary.
-  type_info->size = size;
+  type_info->class_data.message_creator =
+      internal::MessageCreator(DynamicMessage::NewImpl, size);
 
   // Construct the reflection object.
 
@@ -756,14 +758,14 @@ const Message* DynamicMessageFactory::GetPrototypeNoLock(
   DynamicMessage* prototype = new (base) DynamicMessage(type_info, false);
 
   internal::ReflectionSchema schema = {
-      type_info->prototype,
+      static_cast<const Message*>(type_info->class_data.prototype),
       type_info->offsets.get(),
       type_info->has_bits_indices.get(),
       type_info->has_bits_offset,
       PROTOBUF_FIELD_OFFSET(DynamicMessage, _internal_metadata_),
       type_info->extensions_offset,
       type_info->oneof_case_offset,
-      type_info->size,
+      static_cast<int>(type_info->class_data.allocation_size()),
       type_info->weak_field_map_offset,
       nullptr,  // inlined_string_indices_
       0,        // inlined_string_donated_offset_

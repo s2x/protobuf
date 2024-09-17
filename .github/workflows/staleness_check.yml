@@ -6,6 +6,11 @@ on:
     - cron: 0 10 * * *
   workflow_call:
     inputs:
+      continuous-run:
+        required: true
+        description: "Boolean string denoting whether this run is continuous --
+          empty string for presubmit, non-empty string for continuous."
+        type: string
       safe-checkout:
         required: false
         description: "The SHA key for the commit we want to run over"
@@ -18,15 +23,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        branch: [main, 22.x, 23.x, 24.x, 25.x]
+        # TODO Remove this parameterization once the release branch testing is stable.
+        branch: [main, 25.x, 27.x, 28.x]
         os: [{ name: Linux, value: ubuntu-latest}]
+        exclude:
+          # If we are in a presubmit run, only test main
+          - branch: ${{ !inputs.continuous-run && '25.x' }}
+          - branch: ${{ !inputs.continuous-run && '27.x' }}
+          - branch: ${{ !inputs.continuous-run && '28.x' }}
 
     name: Test staleness ${{ matrix.os.name }} ${{ github.head_ref && 'PR' || matrix.branch }}
     runs-on: ${{ matrix.os.value }}
     if: ${{ github.event.repository.full_name == 'protocolbuffers/protobuf' }}
     steps:
       - name: Checkout ${{ github.head_ref && 'PR' || matrix.branch }}
-        uses: protocolbuffers/protobuf-ci/checkout@v2
+        uses: protocolbuffers/protobuf-ci/checkout@v3
         with:
           ref: ${{ inputs.safe-checkout || github.head_ref || matrix.branch }}
 
@@ -49,15 +60,15 @@ jobs:
         # In branches where automatic updates work as post-submits, we don't want to run staleness
         # tests along with user changes.  Any stale files will be automatically fixed in a follow-up
         # commit.
-        uses: protocolbuffers/protobuf-ci/bazel@v2
+        uses: protocolbuffers/protobuf-ci/bazel@v3
         with:
           credentials: ${{ secrets.GAR_SERVICE_ACCOUNT }}
           bazel-cache: staleness
           bash: >
             set -ex;
-            if [[ -z $COMMIT_TRIGGERED_RUN || -z $MAIN_RUN ]]; then
-            bazel query 'attr(tags, "staleness_test", //...)' | xargs bazel test $BAZEL_FLAGS ||
             echo "Please run ./regenerate_stale_files.sh to regenerate stale files";
+            if [[ -z $COMMIT_TRIGGERED_RUN || -z $MAIN_RUN ]]; then
+            bazel query 'attr(tags, "staleness_test", //...)' | xargs bazel test $BAZEL_FLAGS;
             else
             bazel query 'attr(tags, "staleness_test", //...)';
             fi

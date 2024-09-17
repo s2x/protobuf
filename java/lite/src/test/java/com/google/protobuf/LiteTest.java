@@ -10,12 +10,14 @@ package com.google.protobuf;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static java.util.Collections.singletonList;
+import static org.junit.Assert.assertThrows;
 
 import com.google.protobuf.FieldPresenceTestProto.TestAllTypes;
 import com.google.protobuf.UnittestImportLite.ImportEnumLite;
 import com.google.protobuf.UnittestImportPublicLite.PublicImportMessageLite;
 import com.google.protobuf.UnittestLite.ForeignEnumLite;
 import com.google.protobuf.UnittestLite.ForeignMessageLite;
+import com.google.protobuf.UnittestLite.RecursiveGroup;
 import com.google.protobuf.UnittestLite.RecursiveMessage;
 import com.google.protobuf.UnittestLite.TestAllExtensionsLite;
 import com.google.protobuf.UnittestLite.TestAllTypesLite;
@@ -29,6 +31,7 @@ import com.google.protobuf.UnittestLite.TestAllTypesLiteOrBuilder;
 import com.google.protobuf.UnittestLite.TestHugeFieldNumbersLite;
 import com.google.protobuf.UnittestLite.TestNestedExtensionLite;
 import com.google.protobuf.testing.Proto3TestingLite.Proto3MessageLite;
+import map_lite_test.MapTestProto.MapContainer;
 import map_lite_test.MapTestProto.TestMap;
 import map_lite_test.MapTestProto.TestMap.MessageValue;
 import protobuf_unittest.NestedExtensionLite;
@@ -50,6 +53,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -2424,6 +2428,12 @@ public class LiteTest {
   }
 
   @Test
+  public void testParseFromEmptyBytes() throws Exception {
+    assertThat(TestAllTypesLite.parseFrom(new byte[] {}))
+        .isSameInstanceAs(TestAllTypesLite.getDefaultInstance());
+  }
+
+  @Test
   public void testParseFromByteBuffer() throws Exception {
     TestAllTypesLite message =
         TestAllTypesLite.newBuilder()
@@ -2718,7 +2728,7 @@ public class LiteTest {
   @Test
   public void testNullExtensionRegistry() throws Exception {
     try {
-      TestAllTypesLite.parseFrom(new byte[] {}, null);
+      TestAllTypesLite.parseFrom(TestUtilLite.getAllLiteSetBuilder().build().toByteArray(), null);
       assertWithMessage("expected exception").fail();
     } catch (NullPointerException expected) {
     }

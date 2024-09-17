@@ -224,13 +224,35 @@ public abstract class CodedInputStream {
    * Reads and discards an entire message. This will read either until EOF or until an endgroup tag,
    * whichever comes first.
    */
-  public abstract void skipMessage() throws IOException;
+  public void skipMessage() throws IOException {
+    while (true) {
+      final int tag = readTag();
+      if (tag == 0) {
+        return;
+      }
+      boolean fieldSkipped = skipField(tag);
+      if (!fieldSkipped) {
+        return;
+      }
+    }
+  }
 
   /**
    * Reads an entire message and writes it to output in wire format. This will read either until EOF
    * or until an endgroup tag, whichever comes first.
    */
-  public abstract void skipMessage(CodedOutputStream output) throws IOException;
+  public void skipMessage(CodedOutputStream output) throws IOException {
+    while (true) {
+      final int tag = readTag();
+      if (tag == 0) {
+        return;
+      }
+      boolean fieldSkipped = skipField(tag, output);
+      if (!fieldSkipped) {
+        return;
+      }
+    }
+  }
 
   // -----------------------------------------------------------------
 
@@ -697,26 +719,6 @@ public abstract class CodedInputStream {
           }
         default:
           throw InvalidProtocolBufferException.invalidWireType();
-      }
-    }
-
-    @Override
-    public void skipMessage() throws IOException {
-      while (true) {
-        final int tag = readTag();
-        if (tag == 0 || !skipField(tag)) {
-          return;
-        }
-      }
-    }
-
-    @Override
-    public void skipMessage(CodedOutputStream output) throws IOException {
-      while (true) {
-        final int tag = readTag();
-        if (tag == 0 || !skipField(tag, output)) {
-          return;
-        }
       }
     }
 
@@ -1409,26 +1411,6 @@ public abstract class CodedInputStream {
           }
         default:
           throw InvalidProtocolBufferException.invalidWireType();
-      }
-    }
-
-    @Override
-    public void skipMessage() throws IOException {
-      while (true) {
-        final int tag = readTag();
-        if (tag == 0 || !skipField(tag)) {
-          return;
-        }
-      }
-    }
-
-    @Override
-    public void skipMessage(CodedOutputStream output) throws IOException {
-      while (true) {
-        final int tag = readTag();
-        if (tag == 0 || !skipField(tag, output)) {
-          return;
-        }
       }
     }
 
@@ -2178,26 +2160,6 @@ public abstract class CodedInputStream {
       }
     }
 
-    @Override
-    public void skipMessage() throws IOException {
-      while (true) {
-        final int tag = readTag();
-        if (tag == 0 || !skipField(tag)) {
-          return;
-        }
-      }
-    }
-
-    @Override
-    public void skipMessage(CodedOutputStream output) throws IOException {
-      while (true) {
-        final int tag = readTag();
-        if (tag == 0 || !skipField(tag, output)) {
-          return;
-        }
-      }
-    }
-
     /** Collects the bytes skipped and returns the data in a ByteBuffer. */
     private class SkippedDataSink implements RefillCallback {
       private int lastPos = pos;
@@ -2278,6 +2240,9 @@ public abstract class CodedInputStream {
       if (size == 0) {
         return "";
       }
+      if (size < 0) {
+        throw InvalidProtocolBufferException.negativeSize();
+      }
       if (size <= bufferSize) {
         refillBuffer(size);
         String result = new String(buffer, pos, size, UTF_8);
@@ -2302,6 +2267,8 @@ public abstract class CodedInputStream {
         tempPos = oldPos;
       } else if (size == 0) {
         return "";
+      } else if (size < 0) {
+        throw InvalidProtocolBufferException.negativeSize();
       } else if (size <= bufferSize) {
         refillBuffer(size);
         bytes = buffer;
@@ -2396,6 +2363,9 @@ public abstract class CodedInputStream {
       if (size == 0) {
         return ByteString.EMPTY;
       }
+      if (size < 0) {
+        throw InvalidProtocolBufferException.negativeSize();
+      }
       return readBytesSlowPath(size);
     }
 
@@ -2408,6 +2378,8 @@ public abstract class CodedInputStream {
         final byte[] result = Arrays.copyOfRange(buffer, pos, pos + size);
         pos += size;
         return result;
+      } else if (size < 0) {
+        throw InvalidProtocolBufferException.negativeSize();
       } else {
         // Slow path: Build a byte array first then copy it.
         // TODO: Do we want to protect from malicious input streams here?
@@ -2426,6 +2398,9 @@ public abstract class CodedInputStream {
       }
       if (size == 0) {
         return Internal.EMPTY_BYTE_BUFFER;
+      }
+      if (size < 0) {
+        throw InvalidProtocolBufferException.negativeSize();
       }
       // Slow path: Build a byte array first then copy it.
 
@@ -2677,6 +2652,9 @@ public abstract class CodedInputStream {
         throw InvalidProtocolBufferException.negativeSize();
       }
       byteLimit += totalBytesRetired + pos;
+      if (byteLimit < 0) {
+        throw InvalidProtocolBufferException.parseFailure();
+      }
       final int oldLimit = currentLimit;
       if (byteLimit > oldLimit) {
         throw InvalidProtocolBufferException.truncatedMessage();
@@ -3306,26 +3284,6 @@ public abstract class CodedInputStream {
           }
         default:
           throw InvalidProtocolBufferException.invalidWireType();
-      }
-    }
-
-    @Override
-    public void skipMessage() throws IOException {
-      while (true) {
-        final int tag = readTag();
-        if (tag == 0 || !skipField(tag)) {
-          return;
-        }
-      }
-    }
-
-    @Override
-    public void skipMessage(CodedOutputStream output) throws IOException {
-      while (true) {
-        final int tag = readTag();
-        if (tag == 0 || !skipField(tag, output)) {
-          return;
-        }
       }
     }
 
