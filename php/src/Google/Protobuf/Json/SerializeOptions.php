@@ -30,9 +30,9 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-namespace Google\Protobuf;
+namespace Google\Protobuf\Json;
 
-class JsonSerializeOptions
+class SerializeOptions
 {
     //this must match as JSON_SERIALIZE_KEY_* in json_options.h
     const EMIT_DEFAULTS = "emit_defaults";

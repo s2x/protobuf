@@ -21,7 +21,7 @@ use Google\Protobuf\Internal\GPBType;
 use Google\Protobuf\Internal\GPBWire;
 use Google\Protobuf\Internal\MapEntry;
 use Google\Protobuf\Internal\RepeatedField;
-use Google\Protobuf\JsonSerializeOptions;
+use Google\Protobuf\Json\SerializeOptions;
 use Google\Protobuf\ListValue;
 use Google\Protobuf\Value;
 use Google\Protobuf\Struct;
@@ -1553,7 +1553,7 @@ class Message
      *
      * @param array $options An array containing option keys and values.
      * Possible option keys (and corresponding value types) are:
-     * Google\Protobuf\JsonSerializeOptions::EMIT_DEFAULTS - boolean.
+     * Google\Protobuf\Json\SerializeOptions::EMIT_DEFAULTS - boolean.
      * If true, singular primitive fields, repeated fields,
      * and map fields will always be serialized.
      * If false, only serialize non-empty fields. Singular message fields
@@ -1570,7 +1570,7 @@ class Message
                 E_USER_WARNING
             );
 
-            $options = array(JsonSerializeOptions::PRESERVE_PROTO_FIELD_NAMES => boolval($options));
+            $options = array(SerializeOptions::PRESERVE_PROTO_FIELD_NAMES => boolval($options));
         }
 
         $output = new CodedOutputStream($this->jsonByteSize($options));
@@ -2048,12 +2048,12 @@ class Message
 
     private function getEmitDefaults($options = [])
     {
-        return boolval($options[JsonSerializeOptions::EMIT_DEFAULTS] ?? false);
+        return boolval($options[SerializeOptions::EMIT_DEFAULTS] ?? false);
     }
 
     private function getPreserveProtoFieldNames($options = [])
     {
-        return boolval($options[JsonSerializeOptions::PRESERVE_PROTO_FIELD_NAMES] ?? false);
+        return boolval($options[SerializeOptions::PRESERVE_PROTO_FIELD_NAMES] ?? false);
     }
 
     public function __debugInfo()

@@ -1,10 +1,10 @@
 <?php
 
-use Google\Protobuf\JsonSerializeOptions;
+use Google\Protobuf\Json\SerializeOptions;
 
 require_once('test_base.php');
 
-class JsonSerializeOptionsTest extends TestBase
+class SerializeOptionsTest extends TestBase
 {
     public function testPreserveProtoFieldNames()
     {
@@ -14,7 +14,7 @@ class JsonSerializeOptionsTest extends TestBase
         $sut->setStrangeCase('some strange case');
         $sut->setWithJsonName('with json name');
         $data = json_decode(
-            $sut->serializeToJsonString([JsonSerializeOptions::PRESERVE_PROTO_FIELD_NAMES => true]),
+            $sut->serializeToJsonString([SerializeOptions::PRESERVE_PROTO_FIELD_NAMES => true]),
             true
         );
 
@@ -37,7 +37,7 @@ class JsonSerializeOptionsTest extends TestBase
 
         self::assertEquals([], $data);
 
-        $data = json_decode($sut->serializeToJsonString([JsonSerializeOptions::EMIT_DEFAULTS => true]), true);
+        $data = json_decode($sut->serializeToJsonString([SerializeOptions::EMIT_DEFAULTS => true]), true);
         self::assertEquals(
             [
                 'valueString' => '',

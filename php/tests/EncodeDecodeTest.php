@@ -1125,7 +1125,7 @@ class EncodeDecodeTest extends TestBase
         $this->assertSame([], $arrayData['mapStringList']);
         $this->assertSame([], $arrayData['mapStringStruct']);
 
-        $this->assertSame(0, $arrayData['deprecatedOptionalInt32']);
+        $this->assertSame(0, $arrayData['deprecatedInt32']);
 
         // Now assert that setting Sub message to null does not show up in serializing
         $m->setOptionalMessage(null);
@@ -1421,7 +1421,8 @@ class EncodeDecodeTest extends TestBase
             "\"repeatedNoNamespaceMessage\":[],\"repeatedNoNamespaceEnum\":[]," .
             "\"optionalNestedEnum\":\"ZERO\",\"mapStringMessage\":{}," .
             "\"mapStringAny\":{},\"mapStringList\":{}," .
-            "\"mapStringStruct\":{},\"deprecatedOptionalInt32\":0}";
+            "\"mapStringStruct\":{},\"deprecatedInt32\":0,\"deprecatedRepeatedInt32\":[]," .
+            "\"deprecatedMapInt32Int32\":{},\"deprecatedEnum\":\"ZERO\"}";
         $result = $m->serializeToJsonString(['emit_defaults'=> true]);
         $this->assertEquals($expected3, $result);
 

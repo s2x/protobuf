@@ -19,14 +19,14 @@ zend_class_entry* json_options_ce;
 void JsonOptions_ModuleInit() {
   zend_class_entry tmp_ce;
 
-  INIT_CLASS_ENTRY(tmp_ce, "Google\\Protobuf\\JsonSerializeOptions", NULL);
+  INIT_CLASS_ENTRY(tmp_ce, "Google\\Protobuf\\Json\\SerializeOptions", NULL);
 
   json_options_ce = zend_register_internal_class(&tmp_ce);
   zend_declare_class_constant_string(
     json_options_ce,
-    JSON_SERIALIZE_OPTIONS_EMIT_DEFAULTS,
-    strlen(JSON_SERIALIZE_OPTIONS_EMIT_DEFAULTS),
-    JSON_SERIALIZE_KEY_EMIT_DEFAULTS
+    JSON_SERIALIZE_OPTIONS_ALWAYS_PRINT_FIELDS_WITH_NO_PRESENCE,
+    strlen(JSON_SERIALIZE_OPTIONS_ALWAYS_PRINT_FIELDS_WITH_NO_PRESENCE),
+    JSON_SERIALIZE_KEY_ALWAYS_PRINT_FIELDS_WITH_NO_PRESENCE
   );
 
   zend_declare_class_constant_string(
